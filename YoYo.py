@@ -7,201 +7,350 @@ class YoYo(NodeAlgorithm):
                       'inNeighborsKey': 'InNeighbors',
                       'outNeighborsKey': 'OutNeighbors'}
 
-    # TODO: Move to param
+    # Store assigned id (assigned in SetupYoYo)
     ID_KEY = 'id'
 
-    # I'll use a dict {id_value: [source_nodes]}
+    # Store received ids, I'll use a dict {id_value: [source_nodes]}
     RECEIVED_IDS_KEY = 'received_ids'
 
-    # I'll use a dict {response_value: [source_nodes]}
+    # Store received ids that were received while waiting for responses,
+    # I'll use a dict {id_value: [source_nodes]}
+    RECEIVED_IDS_WHILE_WAITING_RESPONSE_KEY = 'received_ids_while_waiting'
+
+    # Store received responses, I'll use a dict {response_value: [source_nodes]}
     RECEIVED_RESPONSES_KEY = 'received_responses'
 
-    # Store nodes that requested pruning
+    # Store nodes that requested pruning, list [source_nodes]
     REQUESTED_PRUNING_KEY = 'requested_pruning'
 
-    # Store that sink pruned itself, used for LEADER status change
-    SINK_PRUNED_KEY = 'sink_pruned'
+    # Store number of sent ids
+    SENT_IDS_KEY = 'sent_ids'
 
-    # TODO: Maybe add message headers??
-    YES_RESPONSE = 'yes'
-    NO_RESPONSE = 'no'
-    PRUNE_RESPONSE = 'prune'
+    # This is sent when a PRUNE is requested
+    PRUNE_REQUEST = 'prune'
 
-    def reset_runtime_memory(self, node):
-        node.memory[self.RECEIVED_IDS_KEY] = {}
-        node.memory[self.RECEIVED_RESPONSES_KEY] = {}
-        node.memory[self.REQUESTED_PRUNING_KEY] = []
-        node.memory[self.SINK_PRUNED_KEY] = False
+    def initializer(self):
+        for node in self.network.nodes():
+            node.memory[self.RECEIVED_IDS_KEY] = {}
+            node.memory[self.RECEIVED_RESPONSES_KEY] = {}
+            node.memory[self.REQUESTED_PRUNING_KEY] = []
+            node.memory[self.SENT_IDS_KEY] = 0
+            node.memory[self.RECEIVED_IDS_WHILE_WAITING_RESPONSE_KEY] = {}
 
-    def remove_in_neighbors(self, node, nodes_to_remove):
-        for node_to_remove in nodes_to_remove:
-            node.memory[self.inNeighborsKey].remove(node_to_remove)
+            if node.status == 'SOURCE':
+                self.network.outbox.insert(0, Message(header=NodeAlgorithm.INI,
+                                           destination=node))
 
-    def remove_out_neighbors(self, node, nodes_to_remove):
-        for node_to_remove in nodes_to_remove:
-            node.memory[self.outNeighborsKey].remove(node_to_remove)
+    def invert_edges(self, node, nodes_to_process, invert_from):
+        for node_to_process in nodes_to_process:
+            if invert_from == 'outNeighbors':
+                node.memory[self.outNeighborsKey].remove(node_to_process)
+                node.memory[self.inNeighborsKey].append(node_to_process)
+            elif invert_from == 'inNeighbors':
+                node.memory[self.inNeighborsKey].remove(node_to_process)
+                node.memory[self.outNeighborsKey].append(node_to_process)
 
-    def reverse_nodes_prune_and_modify_status(self, node, nodes_to_reverse):
-        for node_to_prune in node.memory[self.REQUESTED_PRUNING_KEY]:
-            node.memory[self.outNeighborsKey].remove(node_to_prune)
+    def prune_nodes(self, node, nodes_to_process, prune_from):
+        for node_to_process in nodes_to_process:
+            if prune_from == 'outNeighbors':
+                node.memory[self.outNeighborsKey].remove(node_to_process)
+            elif prune_from == 'inNeighbors':
+                node.memory[self.inNeighborsKey].remove(node_to_process)
 
-        for node_to_reverse in nodes_to_reverse:
-            if node_to_reverse in node.memory[self.inNeighborsKey]:
-                node.memory[self.inNeighborsKey].remove(node_to_reverse)
-                node.memory[self.outNeighborsKey].append(node_to_reverse)
-            elif node_to_reverse in node.memory[self.outNeighborsKey]:
-                node.memory[self.outNeighborsKey].remove(node_to_reverse)
-                node.memory[self.inNeighborsKey].append(node_to_reverse)
+    def send_responses(self, node, no_received=False):
+        # Find min id
+        min_id = min(node.memory[self.RECEIVED_IDS_KEY])
+        no_nodes = []
+        prune_nodes = []
 
-        if len(node.memory[self.inNeighborsKey]) == 0 and \
-                not node.memory[self.SINK_PRUNED_KEY]:
-            if len(node.memory[self.outNeighborsKey]) == 0:
-                node.status = 'LEADER'
-            else:
-                node.status = 'SOURCE'
-
-                # Should this be timer triggered ???
+        received_ids = node.memory[self.RECEIVED_IDS_KEY]
+        for received_id in received_ids:
+            if no_received:
+                # Send NO to all node that sent an id
                 node.send(
-                    Message(destination=node.memory[self.outNeighborsKey],
-                            header='id',
-                            data=node.memory[self.ID_KEY])
+                    Message(destination=received_ids[received_id],
+                            header='response',
+                            data=(False, ))
                 )
-        elif len(node.memory[self.outNeighborsKey]) == 0:
+                no_nodes.extend(received_ids[received_id])
+
+            elif received_id == min_id:
+                # Send YES responses to all inNeighbors that send min_id
+
+                if len(received_ids) == 1 and \
+                        len(node.memory[self.outNeighborsKey]) == 0:
+                    # If node received only min_id and has no outNeighbors
+                    # remaining after inverting and pruning
+                    # it will become a LEAF SINK,
+                    # so send a PRUNE request with the YES response as well
+                    node.send(
+                        Message(destination=received_ids[received_id][0],
+                                header='response',
+                                data=(True, self.PRUNE_REQUEST))
+                    )
+                    prune_nodes.append(received_ids[received_id][0])
+                else:
+                    node.send(
+                        Message(destination=received_ids[received_id][0],
+                                header='response',
+                                data=(True, ))
+                    )
+
+                # Send PRUNE request to extra nodes that sent min_id
+                # and add them to prune_nodes to be pruned
+                node.send(
+                    Message(destination=received_ids[received_id][1:],
+                            header='response',
+                            data=(True, self.PRUNE_REQUEST))
+                )
+                prune_nodes.extend(received_ids[received_id][1:])
+
+            else:
+                # Send NO responses to all inNeighbors that didn't
+                # send min_id and add them to no_nodes to be inverted
+                node.send(
+                    Message(destination=received_ids[received_id],
+                            header='response',
+                            data=(False, ))
+                )
+                no_nodes.extend(received_ids[received_id])
+
+        return no_nodes, prune_nodes
+
+    def end_iteration(self, node):
+
+        if node.status == 'SOURCE':
+            if len(node.memory[self.inNeighborsKey]) == 0:
+                if len(node.memory[self.outNeighborsKey]) == 0:
+                    node.status = 'LEADER'
+
+            else:
+                if len(node.memory[self.outNeighborsKey]) > 0:
+                    node.status = 'INTERMEDIATE'
+                else:
+                    node.status = 'SINK'
+
+        elif node.status == 'INTERMEDIATE':
+            if len(node.memory[self.outNeighborsKey]) == 0:
+                if len(node.memory[self.inNeighborsKey]) == 0:
+                    node.status = 'PRUNED'
+
+        elif node.status == 'SINK':
             if len(node.memory[self.inNeighborsKey]) == 0:
                 node.status = 'PRUNED'
             else:
-                node.status = 'SINK'
-        else:
-            node.status = 'INTERMEDIATE'
+                node.status = 'INTERMEDIATE'
 
-        self.reset_runtime_memory(node)
+        self.do(node)
 
-    def respond_to_in_neighbors(self, node, min_id, all_no=False):
-        # This method returns a list of nodes that will receive a NO response
+    def receive_id(self, node, message):
+        if node.memory[self.SENT_IDS_KEY]:
+            ids = node.memory[self.RECEIVED_IDS_WHILE_WAITING_RESPONSE_KEY]
 
-        ret = []
-        for key in node.memory[self.RECEIVED_IDS_KEY]:
-            send_to = node.memory[self.RECEIVED_IDS_KEY][key]
-            if key == min_id and not all_no:
-                response = self.YES_RESPONSE
+            if message.data in ids:
+                ids[message.data].append(message.source)
             else:
-                response = self.NO_RESPONSE
-                ret.append(send_to[0])
-
-            if len(node.memory[self.inNeighborsKey]) == 1 and node.status == 'SINK':
-                # Only one id was received because only one in-neghbor exists
-                # and this SINK is useless (it's a LEAF SINK),
-                # so send a prune request with the first response as well
-                node.send(
-                    Message(destination=send_to[0],
-                            header='response',
-                            data=(response, self.PRUNE_RESPONSE))
-                )
-                self.remove_in_neighbors(node, [send_to[0]])
-                node.memory[self.SINK_PRUNED_KEY] = True
-            else:
-                node.send(
-                    Message(destination=send_to[0],
-                            header='response',
-                            data=(response, ))
-                )
-            # Request pruning from duplicate nodes for this id
-            if send_to[1:]:
-                node.send(
-                    Message(destination=send_to[1:],
-                            header='response',
-                            data=(response, self.PRUNE_RESPONSE))
-                )
-                self.remove_in_neighbors(node, send_to[1:])
-
-        return ret
-
-    def receive_and_handle_id(self, node, message):
-        if message.data in node.memory[self.RECEIVED_IDS_KEY]:
-            node.memory[self.RECEIVED_IDS_KEY][message.data].append(message.source)
+                ids[message.data] = [message.source]
         else:
-            node.memory[self.RECEIVED_IDS_KEY][message.data] = [message.source]
+            ids = node.memory[self.RECEIVED_IDS_KEY]
 
-        num_of_received_ids = sum(
-            [len(node.memory[self.RECEIVED_IDS_KEY][k])
-             for k in node.memory[self.RECEIVED_IDS_KEY]]
-        )
-        num_of_in_neighbors = len(node.memory[self.inNeighborsKey])
-        if num_of_received_ids >= num_of_in_neighbors:
-            min_id = min(node.memory[self.RECEIVED_IDS_KEY].keys())
-            if node.status == 'INTERMEDIATE':
+            if message.data in ids:
+                ids[message.data].append(message.source)
+            else:
+                ids[message.data] = [message.source]
+
+    def receive_response(self, node, message):
+        responses = node.memory[self.RECEIVED_RESPONSES_KEY]
+        response = message.data[0]
+
+        if response in responses:
+            responses[response].append(message.source)
+        else:
+            responses[response] = [message.source]
+
+        if self.PRUNE_REQUEST in message.data:
+            node.memory[self.REQUESTED_PRUNING_KEY].append(message.source)
+
+    def do_source(self, node):
+        if node.memory[self.SENT_IDS_KEY] == 0:
+            node.memory[self.RECEIVED_RESPONSES_KEY] = {}
+            node.memory[self.REQUESTED_PRUNING_KEY] = []
+
+            node.send(Message(destination=node.memory[self.outNeighborsKey],
+                              header='id',
+                              data=node.memory[self.ID_KEY]))
+            node.memory[self.SENT_IDS_KEY] = len(node.memory[self.outNeighborsKey])
+
+        else:
+            responses = node.memory[self.RECEIVED_RESPONSES_KEY]
+
+            # If responses received for all sent ids handle them
+            num_of_responses = sum(
+                [len(sources) for sources in responses.values()]
+            )
+
+            if num_of_responses >= node.memory[self.SENT_IDS_KEY]:
+
+                if False in responses:
+                    nodes_to_invert = responses[False]
+                else:
+                    nodes_to_invert = []
+
+                nodes_to_prune = node.memory[self.REQUESTED_PRUNING_KEY]
+
+                # Invert edges
+                self.invert_edges(node, nodes_to_invert, 'outNeighbors')
+
+                # Prune nodes
+                self.prune_nodes(node, nodes_to_prune, 'outNeighbors')
+
+                node.memory[self.RECEIVED_RESPONSES_KEY] = {}
+                node.memory[self.REQUESTED_PRUNING_KEY] = []
+                node.memory[self.SENT_IDS_KEY] = 0
+                node.memory[self.RECEIVED_IDS_KEY] = \
+                    node.memory[self.RECEIVED_IDS_WHILE_WAITING_RESPONSE_KEY]
+                node.memory[self.RECEIVED_IDS_WHILE_WAITING_RESPONSE_KEY] = {}
+
+                # End iteration and change status if needed
+                self.end_iteration(node)
+
+    def do_intermediate(self, node):
+        if node.memory[self.SENT_IDS_KEY] == 0:
+
+            ids = node.memory[self.RECEIVED_IDS_KEY]
+
+            # If ids received from all inNeighbors handle them
+            num_of_ids = sum([len(sources) for sources in ids.values()])
+
+            if num_of_ids >= len(node.memory[self.inNeighborsKey]):
+                node.memory[self.RECEIVED_RESPONSES_KEY] = {}
+                node.memory[self.REQUESTED_PRUNING_KEY] = []
+
+                # Find min id
+                min_id = min(ids)
+
+                # Forward min id to outNeighbors
                 node.send(
                     Message(destination=node.memory[self.outNeighborsKey],
                             header='id',
                             data=min_id)
                 )
+                node.memory[self.SENT_IDS_KEY] = len(node.memory[self.outNeighborsKey])
 
-            elif node.status == 'SINK':
-                no_responses = self.respond_to_in_neighbors(node, min_id)
-                self.reverse_nodes_prune_and_modify_status(node, no_responses)
-
-    def receive_and_handle_response(self, node, message):
-        if self.PRUNE_RESPONSE in message.data:
-            node.memory[self.REQUESTED_PRUNING_KEY].append(message.source)
-
-        response = self.YES_RESPONSE if self.YES_RESPONSE in message.data \
-            else self.NO_RESPONSE
-
-        if response in node.memory[self.RECEIVED_RESPONSES_KEY]:
-            node.memory[self.RECEIVED_RESPONSES_KEY][response].append(message.source)
         else:
-            node.memory[self.RECEIVED_RESPONSES_KEY][response] = [message.source]
+            responses = node.memory[self.RECEIVED_RESPONSES_KEY]
 
-        num_of_received_responses = sum(
-            [len(node.memory[self.RECEIVED_RESPONSES_KEY][k])
-             for k in node.memory[self.RECEIVED_RESPONSES_KEY]]
-        )
-        num_of_out_neighbors = len(node.memory[self.outNeighborsKey])
-        if num_of_received_responses >= num_of_out_neighbors:
-            if self.NO_RESPONSE in node.memory[self.RECEIVED_RESPONSES_KEY]:
-                no_nodes = node.memory[self.RECEIVED_RESPONSES_KEY][self.NO_RESPONSE]
-            else:
-                no_nodes = []
+            # If responses received for all sent ids handle them
+            num_of_responses = sum(
+                [len(sources) for sources in responses.values()]
+            )
 
-            if node.status == 'INTERMEDIATE':
-                min_id = min(node.memory[self.RECEIVED_IDS_KEY].keys())
-                no_responses = self.respond_to_in_neighbors(
-                    node, min_id, all_no=len(no_nodes) > 0
-                )
-                no_nodes.extend(no_responses)
+            if num_of_responses >= node.memory[self.SENT_IDS_KEY]:
+                if False in responses:
+                    nodes_to_invert = responses[False]
+                    no_received = True
+                else:
+                    nodes_to_invert = []
+                    no_received = False
 
-                self.reverse_nodes_prune_and_modify_status(node, no_nodes)
+                nodes_to_prune = node.memory[self.REQUESTED_PRUNING_KEY]
 
-            elif node.status == 'SOURCE':
-                self.reverse_nodes_prune_and_modify_status(node, no_nodes)
+                # Invert edges
+                self.invert_edges(node, nodes_to_invert, 'outNeighbors')
 
-    def initializer(self):
-        for node in self.network.nodes():
-            self.reset_runtime_memory(node)
-            if node.status == 'SOURCE':
-                self.network.outbox.insert(0, Message(header=NodeAlgorithm.INI,
-                                           destination=node))
+                # Prune nodes
+                self.prune_nodes(node, nodes_to_prune, 'outNeighbors')
+
+                # Add edges to invert from NO responses sent
+                # Add nodes to prune from PRUNE requests sent
+                no_response_nodes, prune_nodes = \
+                    self.send_responses(node, no_received=no_received)
+
+                # Invert edges
+                self.invert_edges(node, no_response_nodes, 'inNeighbors')
+
+                # Prune nodes
+                self.prune_nodes(node, prune_nodes, 'inNeighbors')
+
+                node.memory[self.RECEIVED_RESPONSES_KEY] = {}
+                node.memory[self.REQUESTED_PRUNING_KEY] = []
+                node.memory[self.RECEIVED_IDS_KEY] = \
+                    node.memory[self.RECEIVED_IDS_WHILE_WAITING_RESPONSE_KEY]
+                node.memory[self.RECEIVED_IDS_WHILE_WAITING_RESPONSE_KEY] = {}
+                node.memory[self.SENT_IDS_KEY] = 0
+
+                # End iteration and change status if needed
+                self.end_iteration(node)
+
+    def do_sink(self, node):
+        ids = node.memory[self.RECEIVED_IDS_KEY]
+
+        # If ids received from all inNeighbors handle them
+        num_of_ids = sum([len(sources) for sources in ids.values()])
+
+        if num_of_ids >= len(node.memory[self.inNeighborsKey]):
+            no_response_nodes, prune_nodes = self.send_responses(node)
+
+            # Invert edges
+            self.invert_edges(node, no_response_nodes, 'inNeighbors')
+
+            # Prune nodes
+            self.prune_nodes(node, prune_nodes, 'inNeighbors')
+
+            node.memory[self.RECEIVED_IDS_KEY] = \
+                node.memory[self.RECEIVED_IDS_WHILE_WAITING_RESPONSE_KEY]
+            node.memory[self.RECEIVED_IDS_WHILE_WAITING_RESPONSE_KEY] = {}
+            node.memory[self.SENT_IDS_KEY] = 0
+
+            # End iteration and change status if needed
+            self.end_iteration(node)
+
+    def do(self, node):
+        if node.status == 'SOURCE':
+            self.do_source(node)
+        elif node.status == 'INTERMEDIATE':
+            self.do_intermediate(node)
+        elif node.status == 'SINK':
+            self.do_sink(node)
 
     def source(self, node, message):
-        if message.header == NodeAlgorithm.INI:
+        if message.header == NodeAlgorithm.INI or node.memory[self.SENT_IDS_KEY] == 0:
+            # Special case. Only one node in graph
+            # If node has no neighbors set its status to LEADER
+            if not node.memory[self.neighborsKey]:
+                node.status = 'LEADER'
+                return
+
             node.send(Message(destination=node.memory[self.outNeighborsKey],
                               header='id',
                               data=node.memory[self.ID_KEY]))
+            node.memory[self.SENT_IDS_KEY] = len(node.memory[self.outNeighborsKey])
 
         elif message.header == 'response':
-            self.receive_and_handle_response(node, message)
+            num_receiverd_responses = self.receive_response(node, message)
 
+        elif message.header == 'id':
+            num_received_ids = self.receive_id(node, message)
+
+        self.do_source(node)
 
     def intermediate(self, node, message):
         if message.header == 'id':
-            self.receive_and_handle_id(node, message)
+            self.receive_id(node, message)
 
         elif message.header == 'response':
-            self.receive_and_handle_response(node, message)
+            self.receive_response(node, message)
+
+        self.do_intermediate(node)
 
     def sink(self, node, message):
         if message.header == 'id':
-            self.receive_and_handle_id(node, message)
+            self.receive_id(node, message)
+
+        elif message.header == 'response':
+            self.receive_response(node, message)
+
+        self.do_sink(node)
 
     def pruned(self, node, message):
         pass
@@ -210,9 +359,9 @@ class YoYo(NodeAlgorithm):
         pass
 
     STATUS = {
-              'SOURCE': source,
-              'INTERMEDIATE': intermediate,
-              'SINK': sink,
-              'PRUNED': pruned,
-              'LEADER': leader
+        'SOURCE': source,
+        'INTERMEDIATE': intermediate,
+        'SINK': sink,
+        'PRUNED': pruned,
+        'LEADER': leader
     }

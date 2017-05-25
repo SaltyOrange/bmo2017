@@ -9,12 +9,11 @@ class SetupYoYo(NodeAlgorithm):
                       'inNeighborsKey': 'InNeighbors',
                       'outNeighborsKey': 'OutNeighbors'}
 
-    # TODO: Move to param
     ID_KEY = 'id'
 
     def initializer(self):
         for i, node in enumerate(self.network.nodes(), start=1):
-            # This isn't needed, I think
+
             node.memory[self.ID_KEY] = i
             node.memory[self.neighborsKey] = \
                 node.compositeSensor.read()['Neighbors']
@@ -27,6 +26,12 @@ class SetupYoYo(NodeAlgorithm):
         if message.header == NodeAlgorithm.INI:
             node.memory[self.inNeighborsKey] = []
             node.memory[self.outNeighborsKey] = []
+
+            # If node has no neighbors set its status to SOURCE
+            if not node.memory[self.neighborsKey]:
+                node.status = 'SOURCE'
+                return
+
             # default destination: send to every neighbor
             node.send(Message(header='id',
                               data=node.memory[self.ID_KEY]))
