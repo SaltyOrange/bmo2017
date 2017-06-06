@@ -4,8 +4,8 @@ from YoYo import YoYo
 
 
 def do_test(net):
-    net.algorithms = ((SetupYoYo, {}), (YoYo, {}))
-    sim = Simulation(net, loglevel='WARNING')
+    net.algorithms = (YoYo, )
+    sim = Simulation(net, logLevel='WARNING')
     try:
         sim.run()
     except e:
@@ -16,19 +16,19 @@ def do_test(net):
         exit()
 
     min_id = min(sim.network.nodes(),
-                 key=lambda node: node.memory['id']).memory['id']
+                 key=lambda node: node.id).id
     for node in sim.network.nodes():
         try:
-            if node.memory['id'] == min_id:
+            if node.id == min_id:
                 # Check if the node with the smallest ID is the LEADER
                 assert node.status == 'LEADER', \
                     'Node %d has status %s, not LEADER' % \
-                    (node.memory['id'], node.status)
+                    (node.id, node.status)
             else:
                 # Check if every other node is PRUNED
                 assert node.status == 'PRUNED', \
                     'Node %d has status %s, not PRUNED' % \
-                    (node.memory['id'], node.status)
+                    (node.id, node.status)
 
         except AssertionError as e:
             net.show()
@@ -45,6 +45,7 @@ print('Testing special cases')
 
 node_range = 100
 nets = [
+    [(100, 100)],
     [(100, 100), (175, 250), (250, 175), (100, 250), (175, 175), (100, 175)],
     [(100, 100), (150, 200), (175, 175), (175, 100), (250, 175), (250, 250),
         (325, 250), (325, 325), (325, 400)]

@@ -31,15 +31,21 @@ class YoYo(NodeAlgorithm):
 
     def initializer(self):
         for node in self.network.nodes():
+            node.memory[self.inNeighborsKey] = []
+            node.memory[self.outNeighborsKey] = []
+
+            node.memory[self.neighborsKey] = \
+                node.compositeSensor.read()['Neighbors']
+            node.status = 'INITIATOR'
+
             node.memory[self.RECEIVED_IDS_KEY] = {}
             node.memory[self.RECEIVED_RESPONSES_KEY] = {}
             node.memory[self.REQUESTED_PRUNING_KEY] = []
             node.memory[self.SENT_IDS_KEY] = 0
             node.memory[self.RECEIVED_IDS_WHILE_WAITING_RESPONSE_KEY] = {}
 
-            if node.status == 'SOURCE':
-                self.network.outbox.insert(0, Message(header=NodeAlgorithm.INI,
-                                           destination=node))
+            self.network.outbox.insert(0, Message(header=NodeAlgorithm.INI,
+                                       destination=node))
 
     def invert_edges(self, node, nodes_to_process, invert_from):
         for node_to_process in nodes_to_process:
@@ -117,13 +123,12 @@ class YoYo(NodeAlgorithm):
 
         return no_nodes, prune_nodes
 
-    def end_iteration(self, node):
+    def change_status(self, node):
 
         if node.status == 'SOURCE':
             if len(node.memory[self.inNeighborsKey]) == 0:
                 if len(node.memory[self.outNeighborsKey]) == 0:
                     node.status = 'LEADER'
-
             else:
                 if len(node.memory[self.outNeighborsKey]) > 0:
                     node.status = 'INTERMEDIATE'
@@ -140,6 +145,14 @@ class YoYo(NodeAlgorithm):
                 node.status = 'PRUNED'
             else:
                 node.status = 'INTERMEDIATE'
+
+        elif node.status == 'IDLE':
+            if node.memory[self.inNeighborsKey]:
+                node.status = 'SINK'
+                if node.memory[self.outNeighborsKey]:
+                    node.status = 'INTERMEDIATE'
+            else:
+                node.status = 'SOURCE'
 
         self.do(node)
 
@@ -178,7 +191,7 @@ class YoYo(NodeAlgorithm):
 
             node.send(Message(destination=node.memory[self.outNeighborsKey],
                               header='id',
-                              data=node.memory[self.ID_KEY]))
+                              data=node.id))
             node.memory[self.SENT_IDS_KEY] = len(node.memory[self.outNeighborsKey])
 
         else:
@@ -212,7 +225,7 @@ class YoYo(NodeAlgorithm):
                 node.memory[self.RECEIVED_IDS_WHILE_WAITING_RESPONSE_KEY] = {}
 
                 # End iteration and change status if needed
-                self.end_iteration(node)
+                self.change_status(node)
 
     def do_intermediate(self, node):
         if node.memory[self.SENT_IDS_KEY] == 0:
@@ -280,7 +293,7 @@ class YoYo(NodeAlgorithm):
                 node.memory[self.SENT_IDS_KEY] = 0
 
                 # End iteration and change status if needed
-                self.end_iteration(node)
+                self.change_status(node)
 
     def do_sink(self, node):
         ids = node.memory[self.RECEIVED_IDS_KEY]
@@ -303,7 +316,7 @@ class YoYo(NodeAlgorithm):
             node.memory[self.SENT_IDS_KEY] = 0
 
             # End iteration and change status if needed
-            self.end_iteration(node)
+            self.change_status(node)
 
     def do(self, node):
         if node.status == 'SOURCE':
@@ -313,20 +326,38 @@ class YoYo(NodeAlgorithm):
         elif node.status == 'SINK':
             self.do_sink(node)
 
-    def source(self, node, message):
-        if message.header == NodeAlgorithm.INI or node.memory[self.SENT_IDS_KEY] == 0:
+    def initiator(self, node, message):
+        if message.header == NodeAlgorithm.INI:
             # Special case. Only one node in graph
             # If node has no neighbors set its status to LEADER
             if not node.memory[self.neighborsKey]:
                 node.status = 'LEADER'
                 return
 
-            node.send(Message(destination=node.memory[self.outNeighborsKey],
-                              header='id',
-                              data=node.memory[self.ID_KEY]))
-            node.memory[self.SENT_IDS_KEY] = len(node.memory[self.outNeighborsKey])
+            # default destination: send to every neighbor
+            node.send(Message(header='init_id', data=node.id))
 
-        elif message.header == 'response':
+            node.status = 'IDLE'
+
+    def idle(self, node, message):
+        if message.header == 'init_id':
+            if message.data < node.id:
+                node.memory[self.inNeighborsKey].append(message.source)
+            else:
+                node.memory[self.outNeighborsKey].append(message.source)
+
+            num_of_in_neighbors = len(node.memory[self.inNeighborsKey])
+            num_of_out_neighbors = len(node.memory[self.outNeighborsKey])
+
+            if num_of_in_neighbors + num_of_out_neighbors >= \
+                    len(node.memory[self.neighborsKey]):
+                self.change_status(node)
+
+        elif message.header == 'id':
+            self.receive_id(node, message)
+
+    def source(self, node, message):
+        if message.header == 'response':
             num_receiverd_responses = self.receive_response(node, message)
 
         elif message.header == 'id':
@@ -359,6 +390,8 @@ class YoYo(NodeAlgorithm):
         pass
 
     STATUS = {
+        'INITIATOR': initiator,
+        'IDLE': idle,
         'SOURCE': source,
         'INTERMEDIATE': intermediate,
         'SINK': sink,
