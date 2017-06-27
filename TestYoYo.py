@@ -1,5 +1,5 @@
 from pymote import NetworkGenerator, Simulation, write_pickle, Network
-from SetupYoYo import SetupYoYo
+
 from YoYo import YoYo
 
 
